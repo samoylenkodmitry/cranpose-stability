@@ -1,0 +1,59 @@
+name: Check and build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: stability-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+  binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, exe: cranpose-stability }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, exe: cranpose-stability }
+          - { os: macos-latest, target: aarch64-apple-darwin, exe: cranpose-stability }
+          - { os: macos-latest, target: x86_64-apple-darwin, exe: cranpose-stability }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, exe: cranpose-stability.exe }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, exe: cranpose-stability.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cranpose-stability-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.exe }}
+          if-no-files-found: error
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./

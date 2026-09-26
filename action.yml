@@ -1,0 +1,33 @@
+name: Cranpose Stability
+description: Check Cranpose composable parameters and annotate source in CI
+author: Dmitry Samoylenko
+branding:
+  icon: check-circle
+  color: purple
+inputs:
+  path:
+    description: Project root relative to the checkout
+    default: .
+  deny-unknown:
+    description: Fail on unknown type contracts as well as warnings
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Build the standalone linter
+      shell: bash
+      env:
+        CARGO_TARGET_DIR: ${{ runner.temp }}/cranpose-stability-target
+      run: cargo build --release --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+    - name: Analyze composable parameters
+      shell: bash
+      env:
+        STABILITY_PROJECT: ${{ inputs.path }}
+        STABILITY_DENY_UNKNOWN: ${{ inputs.deny-unknown }}
+      run: |
+        tool="$RUNNER_TEMP/cranpose-stability-target/release/cranpose-stability"
+        if [ "$RUNNER_OS" = Windows ]; then tool="$tool.exe"; fi
+        args=(--root "$STABILITY_PROJECT" --format github)
+        if [ "$STABILITY_DENY_UNKNOWN" = true ]; then args+=(--deny-unknown); fi
+        "$tool" "${args[@]}"

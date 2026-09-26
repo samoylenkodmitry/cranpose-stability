@@ -1,0 +1,29 @@
+[package]
+name = "cranpose-stability"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Cranpose parameter stability analysis for editors and CI"
+license = "Apache-2.0"
+repository = "https://github.com/samoylenkodmitry/cranpose-stability"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+toml = "0.9"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
+cranpose-core = { git = "https://github.com/samoylenkodmitry/Cranpose", rev = "e177b19985c303a13fcf40d61decc7253fdbe057" }
+
+[lints.rust]
+unsafe_code = "forbid"
+[lints.clippy]
+unwrap_used = "deny"
