@@ -318,3 +318,32 @@ fn unrelated_attribute_import_is_not_cranpose() {
             .is_empty()
     );
 }
+
+#[test]
+fn cell_requires_copy_but_refcell_can_clone_owned_values() {
+    assert_eq!(
+        states(
+            "use std::cell::{Cell,RefCell}; #[composable] fn View(a:Cell<String>, b:Cell<i32>, c:RefCell<String>, d:Cell<Vec<i32>>, e:Cell<Option<i32>>) {}"
+        ),
+        vec![
+            Stability::Incompatible,
+            Stability::Stable,
+            Stability::Stable,
+            Stability::Incompatible,
+            Stability::Stable
+        ]
+    );
+}
+#[test]
+fn cell_copy_contract_resolves_generics_aliases_and_local_derives() {
+    assert_eq!(
+        states(
+            "use std::cell::Cell; #[derive(Copy,Clone,PartialEq)] struct Id(u32); type Alias=Id; #[composable] fn View<T:Copy+Eq>(a:Cell<T>, b:Cell<Alias>, c:T) {}"
+        ),
+        vec![Stability::Stable; 3]
+    );
+    assert_eq!(
+        states("use std::cell::Cell; #[composable] fn View<T:Clone+PartialEq>(a:Cell<T>) {}"),
+        vec![Stability::Unknown]
+    );
+}

@@ -12,6 +12,7 @@ enum Proof {
 #[derive(Clone)]
 pub(crate) struct Shape {
     clone: Proof,
+    copy: Proof,
     eq: Proof,
     interior: bool,
     shared: bool,
@@ -21,6 +22,7 @@ impl Shape {
     fn value() -> Self {
         Self {
             clone: Proof::Yes,
+            copy: Proof::Unknown,
             eq: Proof::Yes,
             interior: false,
             shared: false,
@@ -96,13 +98,19 @@ pub(crate) fn shape(
     )
 }
 fn combines(values: Vec<Shape>) -> Shape {
-    let mut result = Shape::value();
+    let mut result = Shape {
+        copy: Proof::Yes,
+        ..Shape::value()
+    };
     for s in values {
         if s.clone != Proof::Yes && result.clone != Proof::No {
             result.clone = s.clone;
         }
         if s.eq != Proof::Yes && result.eq != Proof::No {
             result.eq = s.eq;
+        }
+        if s.copy != Proof::Yes && result.copy != Proof::No {
+            result.copy = s.copy;
         }
         result.interior |= s.interior;
         result.shared |= s.shared;
@@ -148,7 +156,7 @@ fn inspect(
         Type::Slice(t)=>{let mut s=recurse(&t.elem,visiting);s.clone=Proof::No;s.reason="An unsized slice cannot be stored by value in ParamState.".into();s},
         Type::Reference(r)=>{
             let mut s=recurse(&r.elem,visiting);
-            s.clone=if r.mutability.is_some(){Proof::No}else{Proof::Yes};
+            s.clone=if r.mutability.is_some(){Proof::No}else{Proof::Yes};s.copy=s.clone;
             if r.mutability.is_some(){s.reason="Mutable references do not implement Clone, which a skippable parameter slot requires.".into();}
             else if s.interior || s.shared{s.shared=true;s.reason="This reference aliases interior-mutable data. The retained reference can see the new value on both sides of the comparison.".into();}
             s
@@ -160,7 +168,9 @@ fn inspect(
                 let n=p.path.segments[0].ident.to_string();
                 if let Some(b)=bindings.get(&n){return inspect(&b.ty,&b.context,index,config,&Bindings::new(),bounds,visiting,depth+1);}
                 if let Some(b)=bounds.get(&n) {
-                    return if bounds_has(b,"Clone") && bounds_has(b,"PartialEq") {Shape::value()}else{Shape::unknown(format!("Generic parameter {n} has no directly visible Clone + PartialEq contract."))};
+                    let mut s=if (bounds_has(b,"Clone") || bounds_has(b,"Copy")) && (bounds_has(b,"PartialEq") || bounds_has(b,"Eq")) {Shape::value()}else{Shape::unknown(format!("Generic parameter {n} has no directly visible Clone + PartialEq contract."))};
+                    if bounds_has(b,"Copy") {s.copy=Proof::Yes;}
+                    return s;
                 }
             }
             let key=index.resolve(&p.path,context);
@@ -179,9 +189,10 @@ fn inspect(
                     Definition::Alias{ty,..}=>inspect(ty,&named.context,index,config,&bound,bounds,visiting,depth+1),
                     Definition::Data{fields,clone,eq,copy,..}=>{
                         let mut s=combines(fields.iter().map(|t|inspect(t,&named.context,index,config,&bound,bounds,visiting,depth+1)).collect());
+                        if !copy {s.copy=Proof::Unknown;}
                         if !clone && !copy {s.clone=Proof::Unknown;s.reason=format!("{key} has no source-visible derived Clone contract.");}
                         if !eq {s.eq=Proof::Unknown;s.reason=format!("{key} has no source-visible derived PartialEq contract.");}
-                        if index.manual_traits.get(&key).is_some_and(|t|t.iter().any(|t|t=="PartialEq"||t=="Clone")) {s.eq=Proof::Unknown;s.shared=false;s.interior=false;s.reason=format!("{key} uses a manual Clone or PartialEq implementation; its behavior needs review.");}
+                        if index.manual_traits.get(&key).is_some_and(|t|t.iter().any(|t|t=="PartialEq"||t=="Clone")) {s.eq=Proof::Unknown;s.copy=Proof::Unknown;s.shared=false;s.interior=false;s.reason=format!("{key} uses a manual Clone or PartialEq implementation; its behavior needs review.");}
                         if s.shared {s.reason=format!("{key} contains shared interior-mutable data; cloning does not preserve its previous value.");}
                         s
                     }
@@ -189,32 +200,39 @@ fn inspect(
                 visiting.remove(&key);return result;
             }
             let canonical=key.replace("std::primitive::","core::primitive::").replace("alloc::","std::");
-            if canonical.starts_with("core::primitive::") {let mut s=Shape::value();if canonical.ends_with("::str"){s.clone=Proof::No;s.reason="str is unsized; pass a string value or shared string slice.".into();}return s;}
-            if ["std::string::String","std::path::PathBuf","std::ffi::OsString","std::time::Duration","core::time::Duration","std::time::Instant"].contains(&canonical.as_str()){return Shape::value();}
+            if canonical.starts_with("core::primitive::") {let mut s=Shape{copy:Proof::Yes,..Shape::value()};if canonical.ends_with("::str"){s.clone=Proof::No;s.copy=Proof::No;s.reason="str is unsized; pass a string value or shared string slice.".into();}return s;}
+            if ["std::string::String","std::path::PathBuf","std::ffi::OsString","std::time::Duration","core::time::Duration","std::time::Instant"].contains(&canonical.as_str()){return Shape{copy:if canonical.ends_with("Duration")||canonical.ends_with("Instant"){Proof::Yes}else{Proof::No},..Shape::value()};}
             if ["std::rc::Rc","std::sync::Arc"].contains(&canonical.as_str()){
-                let mut s=combines(children());s.clone=Proof::Yes;
+                let mut s=combines(children());s.clone=Proof::Yes;s.copy=Proof::No;
                 if s.interior||s.shared{s.shared=true;s.reason=format!("{key} shares interior-mutable storage with the retained parameter. Mutation may be missed by equality.");}return s;
             }
             if ["std::cell::Cell","core::cell::Cell","std::cell::RefCell","core::cell::RefCell"].contains(&canonical.as_str()) {
-                let mut s=combines(children());s.interior=true;
+                let mut s=combines(children());
+                if canonical.ends_with("::Cell") && s.copy!=Proof::Yes {
+                    s.clone=s.copy;s.eq=s.copy;
+                    s.reason="Cell<T> requires T: Copy for Clone and PartialEq; that contract is not established for this inner type.".into();
+                }
+                s.copy=Proof::No;s.interior=true;
                 if !s.shared && s.clone==Proof::Yes && s.eq==Proof::Yes{s.reason="An owned cell is cloned by value; shared references to it require separate review.".into();}
                 return s;
             }
             if ["std::sync::Mutex","std::sync::RwLock","std::cell::UnsafeCell","core::cell::UnsafeCell"].contains(&canonical.as_str()) {
-                return Shape{clone:Proof::No,eq:Proof::No,interior:true,shared:false,reason:format!("{key} does not provide the Clone + PartialEq contract required by a parameter slot.")};
+                return Shape{clone:Proof::No,copy:Proof::No,eq:Proof::No,interior:true,shared:false,reason:format!("{key} does not provide the Clone + PartialEq contract required by a parameter slot.")};
             }
-            if canonical.starts_with("std::sync::atomic::") || canonical.starts_with("core::sync::atomic::"){return Shape{clone:Proof::No,eq:Proof::No,interior:true,shared:false,reason:"Atomic values do not implement the required Clone + PartialEq parameter contract.".into()};}
-            if ["core::marker::PhantomData","std::marker::PhantomData"].contains(&canonical.as_str()){return Shape::value();}
+            if canonical.starts_with("std::sync::atomic::") || canonical.starts_with("core::sync::atomic::"){return Shape{clone:Proof::No,copy:Proof::No,eq:Proof::No,interior:true,shared:false,reason:"Atomic values do not implement the required Clone + PartialEq parameter contract.".into()};}
+            if ["core::marker::PhantomData","std::marker::PhantomData"].contains(&canonical.as_str()){return Shape{copy:Proof::Yes,..Shape::value()};}
             if ["std::vec::Vec","std::boxed::Box","core::option::Option","std::option::Option","core::result::Result","std::result::Result","std::collections::HashMap","std::collections::BTreeMap","std::collections::HashSet","std::collections::BTreeSet","std::collections::VecDeque","std::borrow::Cow"].contains(&canonical.as_str()) {
                 if ["std::boxed::Box","std::borrow::Cow"].contains(&canonical.as_str()) {
-                    if let Some(Type::Slice(slice))=args.first() { return recurse(&slice.elem,visiting); }
+                    if let Some(Type::Slice(slice))=args.first() { return Shape{copy:Proof::No,..recurse(&slice.elem,visiting)}; }
                     if let Some(Type::Path(path))=args.first()
-                        && index.resolve(&path.path,context)=="core::primitive::str" { return Shape::value(); }
+                        && index.resolve(&path.path,context)=="core::primitive::str" { return Shape{copy:Proof::No,..Shape::value()}; }
                 }
-                return combines(children());
+                let mut s=combines(children());
+                if !canonical.ends_with("::Option") && !canonical.ends_with("::Result") {s.copy=Proof::No;}
+                return s;
             }
             // Cranpose state handles compare identity and track value reads separately.
-            if ["cranpose::MutableState","cranpose_core::MutableState","cranpose::State","cranpose_core::State"].contains(&key.as_str()){return Shape{reason:"Cranpose state handle: identity is compared and snapshot reads track changes separately.".into(),..Shape::value()};}
+            if ["cranpose::MutableState","cranpose_core::MutableState","cranpose::State","cranpose_core::State"].contains(&key.as_str()){return Shape{copy:Proof::Yes,reason:"Cranpose state handle: identity is compared and snapshot reads track changes separately.".into(),..Shape::value()};}
             Shape::unknown(format!("The Clone/PartialEq and mutation contract of {key} is not visible in this source set."))
         },
         _=>Shape::unknown("This Rust type requires compiler resolution or macro expansion."),
