@@ -21,7 +21,7 @@ walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
-cranpose-core = { git = "https://github.com/samoylenkodmitry/Cranpose", rev = "e177b19985c303a13fcf40d61decc7253fdbe057" }
+cranpose-core = { git = "https://github.com/samoylenkodmitry/Cranpose", rev = "9656ee2eff7e07374279205cefbc40f07f87ce93" }
 
 [lints.rust]
 unsafe_code = "forbid"

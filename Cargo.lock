@@ -143,8 +143,8 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "cranpose-core"
-version = "0.1.164"
-source = "git+https://github.com/samoylenkodmitry/Cranpose?rev=e177b19985c303a13fcf40d61decc7253fdbe057#e177b19985c303a13fcf40d61decc7253fdbe057"
+version = "0.1.170"
+source = "git+https://github.com/samoylenkodmitry/Cranpose?rev=9656ee2eff7e07374279205cefbc40f07f87ce93#9656ee2eff7e07374279205cefbc40f07f87ce93"
 dependencies = [
  "foldhash",
  "futures-task",
