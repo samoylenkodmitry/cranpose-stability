@@ -55,6 +55,7 @@ pub(crate) struct Parsed {
     pub source: SourceFile,
     pub ast: syn::File,
     pub context: Context,
+    pub lines: crate::Lines,
 }
 
 impl Index {

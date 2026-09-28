@@ -347,3 +347,9 @@ fn cell_copy_contract_resolves_generics_aliases_and_local_derives() {
         vec![Stability::Unknown]
     );
 }
+#[test]
+fn statement_errors_inside_bodies_keep_badges() {
+    let r = report("#[composable] fn View(a: i32) { let x = ; }");
+    assert!(r.diagnostics.is_empty());
+    assert_eq!(r.composables[0].parameters[0].stability, Stability::Stable);
+}

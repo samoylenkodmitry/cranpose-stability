@@ -4,6 +4,7 @@ mod analyze;
 mod index;
 pub mod model;
 pub mod output;
+mod parse;
 pub mod project;
 mod types;
 pub use analyze::analyze;

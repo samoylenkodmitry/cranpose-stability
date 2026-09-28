@@ -17,7 +17,7 @@ pub fn analyze(files: &[SourceFile], config: &Config) -> Report {
     let mut parsed = Vec::new();
     let mut index = Index::default();
     for source in files {
-        match syn::parse_file(&source.source) {
+        match crate::parse::file(&source.source) {
             Ok(ast) => {
                 let context = Context {
                     crate_name: source.crate_name.clone(),
@@ -26,6 +26,7 @@ pub fn analyze(files: &[SourceFile], config: &Config) -> Report {
                 };
                 index.collect(&ast.items, &context);
                 parsed.push(Parsed {
+                    lines: Lines::new(&source.source),
                     source: source.clone(),
                     ast,
                     context,
@@ -50,7 +51,7 @@ pub fn analyze(files: &[SourceFile], config: &Config) -> Report {
         collect(
             &file.ast.items,
             &file.context,
-            &file.source,
+            file,
             &index,
             config,
             &mut report,
@@ -67,7 +68,7 @@ pub fn analyze(files: &[SourceFile], config: &Config) -> Report {
 fn collect(
     items: &[Item],
     context: &Context,
-    source: &SourceFile,
+    file: &Parsed,
     index: &Index,
     config: &Config,
     report: &mut Report,
@@ -79,7 +80,7 @@ fn collect(
                     collect(
                         items,
                         &context.child(m.ident.to_string()),
-                        source,
+                        file,
                         index,
                         config,
                         report,
@@ -88,7 +89,7 @@ fn collect(
             }
             Item::Fn(f) => {
                 if let Some(attr) = f.attrs.iter().find(|a| is_composable(a, context, index)) {
-                    function(f, attr, context, source, index, config, report);
+                    function(f, attr, context, file, index, config, report);
                 }
                 let nested: Vec<_> = f
                     .block
@@ -102,7 +103,7 @@ fn collect(
                         }
                     })
                     .collect();
-                collect(&nested, context, source, index, config, report);
+                collect(&nested, context, file, index, config, report);
             }
             _ => {}
         }
@@ -160,11 +161,12 @@ fn function(
     f: &syn::ItemFn,
     attr: &syn::Attribute,
     context: &Context,
-    source: &SourceFile,
+    file: &Parsed,
     index: &Index,
     config: &Config,
     report: &mut Report,
 ) {
+    let source = &file.source;
     let no_skip = attr
         .parse_args::<syn::Ident>()
         .is_ok_and(|i| i == "no_skip");
@@ -181,7 +183,7 @@ fn function(
         path: source.path.clone(),
         qualified_name: format!("{}::{name}", context.key()),
         name: name.clone(),
-        location: Location::span(&source.source, f.sig.ident.span()),
+        location: Location::within(&source.source, &file.lines, f.sig.ident.span()),
         skip_mode: mode.into(),
         parameters: Vec::new(),
     };
@@ -232,7 +234,7 @@ fn function(
         let param = Parameter {
             name: parameter.clone(),
             type_text: p.ty.to_token_stream().to_string(),
-            location: Location::span(&source.source, p.ty.span()),
+            location: Location::within(&source.source, &file.lines, p.ty.span()),
             stability,
             effect,
             reason,
