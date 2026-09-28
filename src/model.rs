@@ -142,6 +142,9 @@ pub struct Parameter {
     pub advice: String,
     pub rule: Option<String>,
     pub suppressed: Option<String>,
+    /// Canonical path of the type that decided the verdict, such as `cranpose_ui::modifier::Modifier`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

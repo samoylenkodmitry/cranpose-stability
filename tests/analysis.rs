@@ -128,11 +128,14 @@ fn foreign_contracts_are_unknown_not_definite_failures() {
     assert!(r.has_findings(true));
 }
 #[test]
-fn manual_equality_requires_review() {
+fn manual_equality_is_the_comparison_contract() {
     let r = report(
         "#[derive(Clone)] struct Model(i32); impl PartialEq for Model{fn eq(&self,_:&Self)->bool{false}} #[composable] fn View(a: Model) {}",
     );
-    assert_eq!(r.composables[0].parameters[0].stability, Stability::Unknown);
+    let p = &r.composables[0].parameters[0];
+    assert_eq!(p.stability, Stability::Stable);
+    assert!(p.reason.contains("manual PartialEq"), "{}", p.reason);
+    assert_eq!(p.resolved_type.as_deref(), Some("app::Model"));
 }
 #[test]
 fn explicit_generic_bounds_are_used() {
@@ -347,9 +350,263 @@ fn cell_copy_contract_resolves_generics_aliases_and_local_derives() {
         vec![Stability::Unknown]
     );
 }
+
+fn crates(files: &[(&str, &str, &str)]) -> Report {
+    let files: Vec<SourceFile> = files
+        .iter()
+        .map(|(krate, module, source)| SourceFile {
+            path: format!(
+                "{krate}/{}.rs",
+                if module.is_empty() { "lib" } else { module }
+            ),
+            source: source.to_string(),
+            crate_name: krate.to_string(),
+            module: module
+                .split('/')
+                .filter(|m| !m.is_empty())
+                .map(str::to_string)
+                .collect(),
+            crate_aliases: [("ui".to_string(), "ui".to_string())].into(),
+        })
+        .collect();
+    analyze(&files, &Config::default())
+}
+fn parameter<'a>(r: &'a Report, name: &str) -> &'a Parameter {
+    r.composables
+        .iter()
+        .flat_map(|c| &c.parameters)
+        .find(|p| p.name == name)
+        .expect("parameter")
+}
+
+#[test]
+fn primitives_and_prelude_types_resolve_under_an_unreadable_glob() {
+    assert_eq!(
+        states(
+            "use cranpose::prelude::*; #[composable] fn View(a: bool, b: String, c: usize, d: &'static str, e: f32, f: Option<String>, g: char, h: Vec<u8>) {}"
+        ),
+        vec![Stability::Stable; 8]
+    );
+}
+#[test]
+fn a_glob_that_exports_a_prelude_name_shadows_it() {
+    let r = crates(&[
+        (
+            "ui",
+            "",
+            "pub mod prelude { pub struct String; pub fn bool() {} }",
+        ),
+        (
+            "app",
+            "",
+            "use ui::prelude::*; #[composable] fn View(a: String, b: bool) {}",
+        ),
+    ]);
+    let a = parameter(&r, "a");
+    assert_eq!(a.stability, Stability::Unknown);
+    assert_eq!(a.resolved_type.as_deref(), Some("ui::prelude::String"));
+    assert_eq!(parameter(&r, "b").stability, Stability::Stable);
+}
+#[test]
+fn private_items_are_not_glob_exported_to_other_crates() {
+    let r = crates(&[
+        (
+            "ui",
+            "",
+            "pub mod prelude { use crate::Hidden as String; pub use crate::Shown; } struct Hidden; #[derive(Clone, PartialEq)] pub struct Shown;",
+        ),
+        (
+            "app",
+            "",
+            "use ui::prelude::*; #[composable] fn View(a: String, b: Shown) {}",
+        ),
+    ]);
+    assert_eq!(parameter(&r, "a").stability, Stability::Stable);
+    assert_eq!(
+        parameter(&r, "b").resolved_type.as_deref(),
+        Some("ui::Shown")
+    );
+}
+#[test]
+fn project_identity_handle_over_shared_storage_is_reported() {
+    let r = report(
+        "use std::{cell::RefCell, rc::Rc}; #[derive(Clone)] struct Handle(Rc<RefCell<i32>>); impl PartialEq for Handle { fn eq(&self, o: &Self) -> bool { Rc::ptr_eq(&self.0, &o.0) } } #[composable] fn View(a: Handle) {}",
+    );
+    let p = &r.composables[0].parameters[0];
+    assert_eq!(p.effect, Effect::SharedMutation);
+    assert!(p.reason.contains("manual PartialEq"), "{}", p.reason);
+    assert!(p.advice.contains("CP003"), "{}", p.advice);
+}
+#[test]
+fn derived_generic_arguments_carry_contracts_and_hazards() {
+    let r = report(
+        "use std::{cell::RefCell, rc::Rc}; use foreign::Opaque; #[derive(Clone, PartialEq)] struct Wrap<T> { value: T } #[composable] fn View(a: Wrap<i32>, b: Wrap<Rc<RefCell<i32>>>, c: Wrap<Opaque>) {}",
+    );
+    let p = &r.composables[0].parameters;
+    assert_eq!(p[0].stability, Stability::Stable);
+    assert_eq!(p[1].effect, Effect::SharedMutation);
+    assert_eq!(p[2].stability, Stability::Unknown);
+    assert_eq!(p[2].resolved_type.as_deref(), Some("foreign::Opaque"));
+}
+#[test]
+fn manual_impl_bounds_decide_generic_arguments() {
+    let r = report(
+        "#[derive(Clone)] struct NoEq; #[derive(Clone)] struct Wrap<T>(T); impl<T: PartialEq> PartialEq for Wrap<T> { fn eq(&self, o: &Self) -> bool { self.0 == o.0 } } struct Id<T>(T); impl<T> Clone for Id<T> { fn clone(&self) -> Self { todo!() } } impl<T> PartialEq for Id<T> { fn eq(&self, _: &Self) -> bool { true } } #[composable] fn View(a: Wrap<i32>, b: Wrap<NoEq>, c: Id<NoEq>) {}",
+    );
+    let p = &r.composables[0].parameters;
+    assert_eq!(p[0].stability, Stability::Stable);
+    assert_eq!(p[1].stability, Stability::Unknown);
+    assert!(p[1].reason.contains("app::NoEq"), "{}", p[1].reason);
+    assert_eq!(p[2].stability, Stability::Stable);
+}
+#[test]
+fn cfg_variants_are_combined_when_their_derives_agree() {
+    assert_eq!(
+        states(
+            "#[cfg(unix)] #[derive(Clone, PartialEq)] struct A(u8); #[cfg(not(unix))] #[derive(Clone, PartialEq)] struct A(u16); \
+             #[cfg(unix)] #[derive(Clone, PartialEq)] struct B(u8); #[cfg(not(unix))] #[derive(Clone)] struct B(u16); \
+             #[derive(Clone, PartialEq)] struct C(u8); #[cfg(any())] struct C(std::sync::Mutex<u8>); \
+             #[composable] fn View(a: A, b: B, c: C) {}"
+        ),
+        vec![Stability::Stable, Stability::Unknown, Stability::Stable]
+    );
+}
+#[test]
+fn supertraits_supply_generic_contracts() {
+    assert_eq!(
+        states(
+            "trait Model: Clone + PartialEq {} trait Loose {} #[composable] fn View<T: Model, U: Loose>(a: T, b: U) {}"
+        ),
+        vec![Stability::Stable, Stability::Unknown]
+    );
+}
+#[test]
+fn standard_value_types_are_known() {
+    let r = report(
+        "use std::{cell::OnceCell, cmp::{Ordering, Reverse}, collections::{BTreeSet, HashMap}, net::IpAddr, num::{NonZeroU32, Wrapping}, ops::Range, path::{Path, PathBuf}, rc::Rc, sync::Arc, time::{Duration, SystemTime}}; \
+         #[composable] fn View(a: char, b: Rc<str>, c: Arc<str>, d: Range<u32>, e: NonZeroU32, f: Ordering, g: IpAddr, h: SystemTime, i: Wrapping<u8>, j: Duration, k: PathBuf, l: [u8; 4], m: (i32, String), n: OnceCell<i32>, o: HashMap<String, i32>, p: BTreeSet<u8>, q: Box<Path>, r: Reverse<i64>, s: std::sync::atomic::Ordering, t: Option<fn(i32) -> i32>) {}",
+    );
+    for p in &r.composables[0].parameters {
+        assert_eq!(
+            p.stability,
+            Stability::Stable,
+            "{}: {}",
+            p.type_text,
+            p.reason
+        );
+    }
+}
+#[test]
+fn standard_types_without_equality_are_incompatible() {
+    let r = report(
+        "use std::{collections::BinaryHeap, rc::{Rc, Weak}, sync::atomic::AtomicBool}; #[composable] fn View(a: Weak<i32>, b: BinaryHeap<i32>, c: Rc<dyn Fn()>, d: AtomicBool) {}",
+    );
+    for p in &r.composables[0].parameters {
+        assert_eq!(
+            p.stability,
+            Stability::Incompatible,
+            "{}: {}",
+            p.type_text,
+            p.reason
+        );
+    }
+}
+#[test]
+fn path_attribute_modules_resolve_their_items() {
+    let file = |path: &str, module: &[&str], source: &str| SourceFile {
+        path: path.into(),
+        source: source.into(),
+        crate_name: "app".into(),
+        module: module.iter().map(|m| m.to_string()).collect(),
+        crate_aliases: Default::default(),
+    };
+    let r = analyze(
+        &[
+            file("src/lib.rs", &[], "mod model; mod feature;"),
+            file(
+                "src/model.rs",
+                &["model"],
+                "#[derive(Clone, PartialEq)] pub struct Body;",
+            ),
+            file(
+                "src/feature.rs",
+                &["feature"],
+                "use std::rc::Rc; #[cfg(test)] #[path = \"tests/feature_tests.rs\"] mod tests;",
+            ),
+            file(
+                "src/tests/feature_tests.rs",
+                &["tests", "feature_tests"],
+                "use super::*; #[composable] fn Helper(a: Rc<i32>) {}",
+            ),
+            file(
+                "runners/demo.rs",
+                &["runners", "demo"],
+                "#[path = \"../src/model.rs\"] mod model; use model::Body; #[composable] fn View(a: Body) {}",
+            ),
+        ],
+        &Config::default(),
+    );
+    assert_eq!(r.composables.len(), 2);
+    for c in &r.composables {
+        assert_eq!(
+            c.parameters[0].stability,
+            Stability::Stable,
+            "{}",
+            c.parameters[0].reason
+        );
+    }
+    assert!(
+        r.composables
+            .iter()
+            .any(|c| c.qualified_name == "app::feature::tests::Helper")
+    );
+}
+#[test]
+fn function_body_imports_scope_nested_composables() {
+    let r = report(
+        "#[test] fn scenario() { use std::rc::Rc; #[composable] fn Reader(a: Rc<i32>, b: Local) {} #[derive(Clone, PartialEq)] struct Local; }",
+    );
+    assert_eq!(r.composables[0].qualified_name, "app::Reader");
+    assert_eq!(
+        r.composables[0]
+            .parameters
+            .iter()
+            .map(|p| p.stability)
+            .collect::<Vec<_>>(),
+        vec![Stability::Stable; 2]
+    );
+}
+#[test]
+fn composable_reexported_by_cranpose_ui_is_recognized() {
+    assert_eq!(
+        report("use cranpose_ui::composable; #[composable] fn View(a: i32) {}")
+            .composables
+            .len(),
+        1
+    );
+}
 #[test]
 fn statement_errors_inside_bodies_keep_badges() {
     let r = report("#[composable] fn View(a: i32) { let x = ; }");
     assert!(r.diagnostics.is_empty());
     assert_eq!(r.composables[0].parameters[0].stability, Stability::Stable);
+}
+#[test]
+fn unresolved_names_explain_what_was_searched() {
+    let r = crates(&[
+        ("ui", "", "pub mod prelude { pub struct Text; }"),
+        (
+            "app",
+            "",
+            "use ui::prelude::*; #[composable] fn View(a: Missing) {}",
+        ),
+    ]);
+    let a = parameter(&r, "a");
+    assert_eq!(a.stability, Stability::Unknown);
+    assert!(
+        a.reason.contains("`use ui::prelude::*` does not export it"),
+        "{}",
+        a.reason
+    );
+    assert!(a.advice.contains("Import Missing"), "{}", a.advice);
 }

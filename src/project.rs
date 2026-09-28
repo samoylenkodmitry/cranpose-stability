@@ -1,4 +1,4 @@
-use crate::{Config, Report, SourceFile, analyze};
+use crate::{Config, Report, SourceFile, analyze::analyze_with, deps::Deps};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,9 +22,13 @@ pub struct ProjectRequest {
     pub overlays: Vec<Overlay>,
     #[serde(default)]
     pub only: Vec<String>,
+    /// Where Cargo keeps dependency sources. Defaults to `CARGO_HOME`, then `~/.cargo`.
+    #[serde(default)]
+    pub cargo_home: Option<PathBuf>,
 }
 
 /// Load configuration and source without running Cargo, rustc or build scripts.
+/// Dependency sources are read from Cargo's local cache on demand; nothing is fetched.
 pub fn analyze_project(request: &ProjectRequest) -> Result<Report> {
     let root = request.root.canonicalize().context("project root")?;
     if !root.is_dir() {
@@ -103,11 +107,23 @@ pub fn analyze_project(request: &ProjectRequest) -> Result<Report> {
     if paths.len() > 20_000 {
         bail!("more than 20,000 Rust files; narrow the project root or configure exclude");
     }
-    let workspace = std::fs::read_to_string(root.join("Cargo.toml"))
-        .ok()
-        .and_then(|s| toml::from_str::<toml::Value>(&s).ok());
+    let lock_dir = root
+        .ancestors()
+        .take(8)
+        .find(|d| d.join("Cargo.lock").is_file())
+        .unwrap_or(&root);
+    let cargo_home = request
+        .cargo_home
+        .clone()
+        .or_else(|| std::env::var_os("CARGO_HOME").map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| PathBuf::from(h).join(".cargo"))
+        });
+    let mut deps = Deps::new(cargo_home, Some(lock_dir));
+    let mut files = Vec::new();
     let mut manifests = BTreeMap::new();
-    let mut sources = Vec::new();
     for path in paths {
         let rel = relative(&root, &path);
         if excludes.iter().any(|g| g.is_match(&rel)) {
@@ -126,50 +142,48 @@ pub fn analyze_project(request: &ProjectRequest) -> Result<Report> {
             .skip(1)
             .take_while(|p| p.starts_with(&root))
             .find(|p| p.join("Cargo.toml").is_file())
-            .unwrap_or(&root);
-        if !manifests.contains_key(package) {
+            .unwrap_or(&root)
+            .to_path_buf();
+        if !manifests.contains_key(&package) {
             let manifest = std::fs::read_to_string(package.join("Cargo.toml"))
                 .ok()
                 .and_then(|s| toml::from_str::<toml::Value>(&s).ok());
             let name = manifest
                 .as_ref()
                 .and_then(|v| v.get("package")?.get("name")?.as_str())
-                .map(|s| s.replace('-', "_"))
+                .map(str::to_string);
+            // Qualified names keep the package name; binaries may use a renamed library name.
+            let key = name
+                .as_ref()
+                .map(|n| n.replace('-', "_"))
                 .unwrap_or_else(|| "crate".into());
-            let mut aliases = BTreeMap::new();
-            for section in ["dependencies", "dev-dependencies"] {
-                if let Some(deps) = manifest
-                    .as_ref()
-                    .and_then(|v| v.get(section))
-                    .and_then(toml::Value::as_table)
-                {
-                    for (alias, value) in deps {
-                        let value = if value.get("workspace").and_then(toml::Value::as_bool)
-                            == Some(true)
-                        {
-                            workspace
-                                .as_ref()
-                                .and_then(|v| v.get("workspace")?.get("dependencies")?.get(alias))
-                                .unwrap_or(value)
-                        } else {
-                            value
-                        };
-                        let package = value
-                            .get("package")
-                            .and_then(toml::Value::as_str)
-                            .unwrap_or(alias);
-                        aliases.insert(alias.replace('-', "_"), package.replace('-', "_"));
-                    }
-                }
+            deps.add_local(&key, name.as_deref().unwrap_or_default(), Some(&package));
+            if let Some(lib) = manifest
+                .as_ref()
+                .and_then(|v| v.get("lib")?.get("name")?.as_str())
+                .filter(|lib| *lib != key)
+            {
+                deps.extend_aliases(&key, &[(lib.to_string(), key.clone())].into());
             }
-            manifests.insert(package.to_path_buf(), (name, aliases));
+            manifests.insert(package.clone(), (key, manifest));
         }
-        let (crate_name, crate_aliases) = manifests
-            .get(package)
-            .cloned()
-            .unwrap_or_else(|| ("crate".into(), BTreeMap::new()));
+        files.push((rel, source, package, path));
+    }
+    // Every project package is registered before dependencies are mapped, so path
+    // dependencies between members stay project crates.
+    let mut aliases = BTreeMap::new();
+    for (dir, (key, manifest)) in &manifests {
+        let map = manifest
+            .as_ref()
+            .map(|m| deps.local_aliases(key, m))
+            .unwrap_or_default();
+        aliases.insert(dir.clone(), map);
+    }
+    let mut sources = Vec::new();
+    for (rel, source, package, path) in files {
+        let (crate_name, _) = &manifests[&package];
         let local = path
-            .strip_prefix(package)
+            .strip_prefix(&package)
             .context("package-relative path")?;
         let mut module = local
             .with_extension("")
@@ -188,12 +202,12 @@ pub fn analyze_project(request: &ProjectRequest) -> Result<Report> {
         sources.push(SourceFile {
             path: rel,
             source,
-            crate_name,
+            crate_name: crate_name.clone(),
             module,
-            crate_aliases,
+            crate_aliases: aliases[&package].clone(),
         });
     }
-    let mut report = analyze(&sources, &config);
+    let mut report = analyze_with(&sources, &config, deps);
     if !request.only.is_empty() {
         report
             .composables
