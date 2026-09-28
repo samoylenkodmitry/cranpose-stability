@@ -512,6 +512,25 @@ fn standard_types_without_equality_are_incompatible() {
     }
 }
 #[test]
+fn local_macro_rules_type_generators_are_expanded() {
+    let r = report(
+        "macro_rules! unit { ($name:ident, $doc:literal) => { #[doc = $doc] #[derive(Clone, Copy, PartialEq)] pub struct $name(pub f32); }; } \
+         unit!(Dp, \"Density-independent pixels\"); \
+         macro_rules! ids { ($($name:ident),* $(,)?) => { $( #[derive(Clone, PartialEq)] pub struct $name(u64); )* }; } \
+         ids!(UserId, PostId,); \
+         #[composable] fn View(a: Dp, b: UserId, c: PostId, d: std::cell::Cell<Dp>) {}",
+    );
+    for p in &r.composables[0].parameters {
+        assert_eq!(
+            p.stability,
+            Stability::Stable,
+            "{}: {}",
+            p.type_text,
+            p.reason
+        );
+    }
+}
+#[test]
 fn path_attribute_modules_resolve_their_items() {
     let file = |path: &str, module: &[&str], source: &str| SourceFile {
         path: path.into(),

@@ -4,6 +4,7 @@
 mod analyze;
 mod deps;
 mod index;
+mod macros;
 pub mod model;
 pub mod output;
 mod parse;

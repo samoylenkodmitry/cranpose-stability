@@ -1,5 +1,5 @@
 //! Name resolution over project sources and dependency sources read on demand.
-use crate::deps::Deps;
+use crate::{deps::Deps, macros::Rules};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
@@ -136,6 +136,16 @@ pub(crate) struct Index {
     active: RefCell<HashSet<(String, String, Vis)>>,
     /// Shapes of types without arguments, shared by all parameters of one run.
     pub shapes: RefCell<HashMap<String, crate::types::Shape>>,
+    /// `macro_rules!` definitions by crate, and item invocations still waiting for one.
+    macros: RefCell<HashMap<String, HashMap<String, Rc<Rules>>>>,
+    waiting: RefCell<HashMap<String, Vec<Invocation>>>,
+    expanding: std::cell::Cell<usize>,
+}
+struct Invocation {
+    name: String,
+    tokens: proc_macro2::TokenStream,
+    context: Context,
+    dir: Option<(PathBuf, PathBuf)>,
 }
 
 impl Index {
@@ -261,6 +271,10 @@ impl Index {
                                 if let Some(children) = children {
                                     self.module(&child.key()).pending.push((file, children));
                                 }
+                                // Textually scoped macros must be known before later modules use them.
+                                if m.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
+                                    self.ensure(&child.key());
+                                }
                             }
                         }
                         (None, None) => {}
@@ -310,6 +324,7 @@ impl Index {
                     vis(&t.vis),
                     cfg,
                 ),
+                Item::Macro(m) => self.macro_item(m, context, dir),
                 Item::Impl(i) => {
                     if let (Some((None, tr, _)), Type::Path(ty)) = (&i.trait_, i.self_ty.as_ref())
                         && let Some(last) = tr.segments.last()
@@ -331,6 +346,87 @@ impl Index {
                 }
                 _ => {}
             }
+        }
+    }
+    /// Record a `macro_rules!` definition, or expand an item invocation of a crate-local one.
+    fn macro_item(&self, m: &syn::ItemMacro, context: &Context, dir: Option<(&Path, &Path)>) {
+        let Some(name) = m.mac.path.segments.last().map(|s| s.ident.to_string()) else {
+            return;
+        };
+        let krate = context.crate_name.clone();
+        if let Some(ident) = &m.ident {
+            if name != "macro_rules" {
+                return;
+            }
+            let Some(rules) = Rules::parse(m.mac.tokens.clone()) else {
+                return;
+            };
+            let name = ident.to_string();
+            self.macros
+                .borrow_mut()
+                .entry(krate.clone())
+                .or_default()
+                .insert(name.clone(), Rc::new(rules));
+            let ready: Vec<Invocation> = match self.waiting.borrow_mut().get_mut(&krate) {
+                Some(w) => {
+                    let (ready, rest) = std::mem::take(w).into_iter().partition(|i| i.name == name);
+                    *w = rest;
+                    ready
+                }
+                None => Vec::new(),
+            };
+            for i in ready {
+                let dir = i.dir.as_ref().map(|(a, b)| (a.as_path(), b.as_path()));
+                self.expand(&i.name, i.tokens, &i.context, dir);
+            }
+            return;
+        }
+        if m.mac.path.segments.len() > 2 {
+            return;
+        }
+        if self
+            .macros
+            .borrow()
+            .get(&krate)
+            .is_some_and(|r| r.contains_key(&name))
+        {
+            self.expand(&name, m.mac.tokens.clone(), context, dir);
+        } else {
+            self.waiting
+                .borrow_mut()
+                .entry(krate)
+                .or_default()
+                .push(Invocation {
+                    name,
+                    tokens: m.mac.tokens.clone(),
+                    context: context.clone(),
+                    dir: dir.map(|(a, b)| (a.to_path_buf(), b.to_path_buf())),
+                });
+        }
+    }
+    fn expand(
+        &self,
+        name: &str,
+        tokens: proc_macro2::TokenStream,
+        context: &Context,
+        dir: Option<(&Path, &Path)>,
+    ) {
+        let rules = self
+            .macros
+            .borrow()
+            .get(&context.crate_name)
+            .and_then(|r| r.get(name).cloned());
+        let depth = self.expanding.get();
+        if depth > 16 {
+            return;
+        }
+        if let Some(file) = rules
+            .and_then(|r| r.expand(tokens))
+            .and_then(|t| syn::parse2::<syn::File>(t).ok())
+        {
+            self.expanding.set(depth + 1);
+            self.collect(&file.items, context, dir);
+            self.expanding.set(depth);
         }
     }
     fn module(&self, key: &str) -> std::cell::RefMut<'_, Module> {
@@ -970,6 +1066,7 @@ fn attributes(item: &Item) -> &[syn::Attribute] {
         Item::ExternCrate(i) => &i.attrs,
         Item::Fn(i) => &i.attrs,
         Item::Impl(i) => &i.attrs,
+        Item::Macro(i) => &i.attrs,
         Item::Mod(i) => &i.attrs,
         Item::Struct(i) => &i.attrs,
         Item::Trait(i) => &i.attrs,

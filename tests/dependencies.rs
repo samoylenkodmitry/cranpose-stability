@@ -317,10 +317,10 @@ fn cranpose_state_handles_resolve_through_reexports() {
         "0.1.9",
         &[],
         &[
-            ("lib.rs", "mod units;\npub use units::*;"),
+            ("lib.rs", "#[macro_use] mod units;\npub use units::*;"),
             (
                 "units.rs",
-                "#[derive(Clone, Copy, PartialEq)] pub struct Dp(pub f32);",
+                "macro_rules! unit { ($name:ident) => { #[derive(Clone, Copy, PartialEq)] pub struct $name(pub f32); }; }\nunit!(Dp);",
             ),
         ],
     )
