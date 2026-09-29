@@ -50,44 +50,60 @@ pub struct Location {
     pub end_line: usize,
     pub end_column: usize,
 }
+/// Byte and UTF-16 offsets of line starts, so each location costs one line scan.
+pub(crate) struct Lines {
+    bytes: Vec<usize>,
+    utf16: Vec<usize>,
+}
+impl Lines {
+    pub(crate) fn new(source: &str) -> Self {
+        let (mut bytes, mut utf16, mut units) = (vec![0], vec![0], 0);
+        for (i, c) in source.char_indices() {
+            units += c.len_utf16();
+            if c == '\n' {
+                bytes.push(i + 1);
+                utf16.push(units);
+            }
+        }
+        Self { bytes, utf16 }
+    }
+}
 impl Location {
     pub(crate) fn span(source: &str, span: proc_macro2::Span) -> Self {
+        Self::within(source, &Lines::new(source), span)
+    }
+    pub(crate) fn within(source: &str, lines: &Lines, span: proc_macro2::Span) -> Self {
+        // (byte offset, UTF-16 offset, one-based UTF-16 column)
         let at = |p: proc_macro2::LineColumn| {
-            let base = source
-                .split_inclusive('\n')
-                .take(p.line.saturating_sub(1))
-                .map(str::len)
-                .sum::<usize>();
-            let bytes = source
+            let line = p.line.saturating_sub(1).min(lines.bytes.len() - 1);
+            let base = lines.bytes[line];
+            let (mut bytes, mut units) = (0, 0);
+            for c in source
                 .get(base..)
                 .unwrap_or_default()
                 .chars()
                 .take(p.column)
-                .map(char::len_utf8)
-                .sum::<usize>();
-            (base + bytes).min(source.len())
+            {
+                bytes += c.len_utf8();
+                units += c.len_utf16();
+            }
+            (
+                (base + bytes).min(source.len()),
+                lines.utf16[line] + units,
+                units + 1,
+            )
         };
-        let start = at(span.start());
-        let end = at(span.end());
-        let prefix = |offset| source.get(..offset).unwrap_or_default();
-        let column = |offset| {
-            prefix(offset)
-                .rsplit('\n')
-                .next()
-                .unwrap_or_default()
-                .encode_utf16()
-                .count()
-                + 1
-        };
+        let (start, utf16_start, column) = at(span.start());
+        let (end, utf16_end, end_column) = at(span.end());
         Self {
             start,
             end,
-            utf16_start: prefix(start).encode_utf16().count(),
-            utf16_end: prefix(end).encode_utf16().count(),
+            utf16_start,
+            utf16_end,
             line: span.start().line,
-            column: column(start),
+            column,
             end_line: span.end().line,
-            end_column: column(end),
+            end_column,
         }
     }
 }
@@ -126,6 +142,9 @@ pub struct Parameter {
     pub advice: String,
     pub rule: Option<String>,
     pub suppressed: Option<String>,
+    /// Canonical path of the type that decided the verdict, such as `cranpose_ui::modifier::Modifier`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

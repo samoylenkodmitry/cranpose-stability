@@ -52,6 +52,7 @@ fn run() -> Result<i32> {
             root: args.root,
             overlays: Vec::new(),
             only: Vec::new(),
+            cargo_home: None,
         }
     };
     let report = analyze_project(&request)?;

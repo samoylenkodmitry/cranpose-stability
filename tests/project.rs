@@ -27,6 +27,7 @@ fn unsaved_overlay_changes_analysis_and_leaves_disk_untouched() {
             source: "#[cranpose::composable] fn View(a:impl Fn()) {}".into(),
         }],
         only: vec![],
+        cargo_home: Some(dir.path().join("no-cargo-home")),
     })
     .expect("report");
     assert_eq!(r.diagnostics[0].rule, "CP001");
@@ -46,6 +47,7 @@ fn excludes_and_target_are_respected() {
         root: dir.path().into(),
         overlays: vec![],
         only: vec![],
+        cargo_home: Some(dir.path().join("no-cargo-home")),
     })
     .expect("report");
     assert!(r.diagnostics.is_empty());
@@ -55,6 +57,7 @@ fn cli_exit_codes_and_json_are_ci_ready() {
     let dir = fixture();
     let invoke = || {
         Command::new(env!("CARGO_BIN_EXE_cranpose-stability"))
+            .env("CARGO_HOME", dir.path().join("no-cargo-home"))
             .args([
                 "--root",
                 dir.path().to_str().expect("utf8"),
@@ -91,7 +94,8 @@ fn malformed_config_is_an_error() {
         analyze_project(&ProjectRequest {
             root: dir.path().into(),
             overlays: vec![],
-            only: vec![]
+            only: vec![],
+            cargo_home: Some(dir.path().join("no-cargo-home")),
         })
         .is_err()
     );
@@ -110,6 +114,7 @@ fn renamed_cranpose_dependency_and_macro_import_are_supported() {
         root: dir.path().into(),
         overlays: vec![],
         only: vec![],
+        cargo_home: Some(dir.path().join("no-cargo-home")),
     })
     .expect("report");
     assert_eq!(r.composables.len(), 1);

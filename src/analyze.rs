@@ -1,12 +1,26 @@
 use crate::{
-    index::{Context, Index, Parsed},
+    deps::Deps,
+    index::{Context, Index},
     types, *,
 };
 use quote::ToTokens;
+use std::collections::HashMap;
 use syn::{FnArg, Item, Type, TypeParamBound, spanned::Spanned};
 
+struct Parsed {
+    source: SourceFile,
+    ast: syn::File,
+    context: Context,
+    lines: Lines,
+}
+
 /// Analyze sources without compiling or executing any project code.
+/// Only the supplied files are read; `crate_aliases` naming other crates stay unresolved.
 pub fn analyze(files: &[SourceFile], config: &Config) -> Report {
+    analyze_with(files, config, Deps::default())
+}
+/// Analyze sources, reading dependency sources that `deps` can locate on demand.
+pub(crate) fn analyze_with(files: &[SourceFile], config: &Config, deps: Deps) -> Report {
     let mut report = Report {
         schema_version: 1,
         policy: "cranpose-param-state-v1".into(),
@@ -15,17 +29,21 @@ pub fn analyze(files: &[SourceFile], config: &Config) -> Report {
         diagnostics: Vec::new(),
     };
     let mut parsed = Vec::new();
-    let mut index = Index::default();
+    let index = Index::new(deps);
     for source in files {
-        match syn::parse_file(&source.source) {
+        let mut deps = index.deps.borrow_mut();
+        deps.add_local(&source.crate_name, &source.crate_name, None);
+        deps.extend_aliases(&source.crate_name, &source.crate_aliases);
+    }
+    for source in files {
+        match crate::parse::file(&source.source) {
             Ok(ast) => {
                 let context = Context {
                     crate_name: source.crate_name.clone(),
                     module: source.module.clone(),
-                    crate_aliases: source.crate_aliases.clone(),
                 };
-                index.collect(&ast.items, &context);
                 parsed.push(Parsed {
+                    lines: Lines::new(&source.source),
                     source: source.clone(),
                     ast,
                     context,
@@ -43,14 +61,18 @@ pub fn analyze(files: &[SourceFile], config: &Config) -> Report {
             }),
         }
     }
+    let links = plan_modules(&mut parsed);
     for file in &parsed {
-        index.collect_impls(&file.ast.items, &file.context);
+        index.add_local(&file.ast.items, &file.context);
+    }
+    for (parent, name, target) in links {
+        index.link_module(&parent, &name, &target);
     }
     for file in &parsed {
         collect(
             &file.ast.items,
             &file.context,
-            &file.source,
+            file,
             &index,
             config,
             &mut report,
@@ -64,10 +86,117 @@ pub fn analyze(files: &[SourceFile], config: &Config) -> Report {
     });
     report
 }
+/// Project modules come from file layout. A file that only a nonstandard `mod` item loads
+/// (`#[path]`, test helpers) takes that item's module; other declarations become aliases.
+fn plan_modules(parsed: &mut [Parsed]) -> Vec<(Context, String, Context)> {
+    let by_path: HashMap<String, usize> = parsed
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (normalize(&p.source.path), i))
+        .collect();
+    let declarations = |parsed: &[Parsed]| {
+        let mut out = Vec::new();
+        for p in parsed {
+            let (dir, file) = p
+                .source
+                .path
+                .rsplit_once('/')
+                .unwrap_or(("", &p.source.path));
+            let stem = file.trim_end_matches(".rs");
+            let children = if ["lib", "main", "mod"].contains(&stem) {
+                dir.to_string()
+            } else {
+                join(dir, stem)
+            };
+            declared(&p.ast.items, &p.context, dir, &children, &by_path, &mut out);
+        }
+        out
+    };
+    // Repeat so that files loaded from moved files (nested `#[path]` chains) settle too.
+    for _ in 0..8 {
+        let mut declared: HashMap<usize, Vec<Context>> = HashMap::new();
+        for (parent, name, t) in declarations(parsed) {
+            declared.entry(t).or_default().push(parent.child(name));
+        }
+        let mut changed = false;
+        for (t, contexts) in declared {
+            if !contexts.contains(&parsed[t].context) {
+                parsed[t].context = contexts[0].clone();
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    declarations(parsed)
+        .into_iter()
+        .filter(|(parent, name, t)| parent.child(name.clone()) != parsed[*t].context)
+        .map(|(parent, name, t)| (parent, name, parsed[t].context.clone()))
+        .collect()
+}
+/// `mod name;` items and the project file each one loads.
+fn declared(
+    items: &[Item],
+    context: &Context,
+    base: &str,
+    children: &str,
+    files: &HashMap<String, usize>,
+    out: &mut Vec<(Context, String, usize)>,
+) {
+    for item in items {
+        let Item::Mod(m) = item else { continue };
+        let name = m.ident.to_string();
+        match &m.content {
+            Some((_, items)) => {
+                let dir = join(children, &name);
+                declared(items, &context.child(name), &dir, &dir, files, out);
+            }
+            None => {
+                let candidates = match crate::index::path_attr(&m.attrs) {
+                    Some(p) => vec![join(base, &p)],
+                    None => [children, base]
+                        .iter()
+                        .flat_map(|d| {
+                            [
+                                join(d, &format!("{name}.rs")),
+                                join(d, &format!("{name}/mod.rs")),
+                            ]
+                        })
+                        .collect(),
+                };
+                if let Some(&t) = candidates.iter().find_map(|c| files.get(&normalize(c))) {
+                    out.push((context.clone(), name, t));
+                }
+            }
+        }
+    }
+}
+fn join(dir: &str, path: &str) -> String {
+    if dir.is_empty() {
+        path.into()
+    } else {
+        format!("{dir}/{path}")
+    }
+}
+/// Resolve `.` and `..` lexically in a project-relative path.
+fn normalize(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    parts.join("/")
+}
 fn collect(
     items: &[Item],
     context: &Context,
-    source: &SourceFile,
+    file: &Parsed,
     index: &Index,
     config: &Config,
     report: &mut Report,
@@ -79,7 +208,7 @@ fn collect(
                     collect(
                         items,
                         &context.child(m.ident.to_string()),
-                        source,
+                        file,
                         index,
                         config,
                         report,
@@ -88,7 +217,7 @@ fn collect(
             }
             Item::Fn(f) => {
                 if let Some(attr) = f.attrs.iter().find(|a| is_composable(a, context, index)) {
-                    function(f, attr, context, source, index, config, report);
+                    function(f, attr, context, file, index, config, report);
                 }
                 let nested: Vec<_> = f
                     .block
@@ -102,21 +231,29 @@ fn collect(
                         }
                     })
                     .collect();
-                collect(&nested, context, source, index, config, report);
+                if !nested.is_empty() {
+                    let block = context.block(&f.sig.ident);
+                    index.add_local(&nested, &block);
+                    collect(&nested, &block, file, index, config, report);
+                }
             }
             _ => {}
         }
     }
 }
 fn is_composable(a: &syn::Attribute, context: &Context, index: &Index) -> bool {
-    let path = index.resolve(a.path(), context);
+    let path = index.macro_path(a.path(), context);
+    let krate = path.split("::").next().unwrap_or_default();
+    let krate = krate.split('@').next().unwrap_or_default();
     path == "composable"
-        || [
-            "cranpose::composable",
-            "cranpose_core::composable",
-            "cranpose_macros::composable",
-        ]
-        .contains(&path.as_str())
+        || path.ends_with("::composable")
+            && [
+                "cranpose",
+                "cranpose_core",
+                "cranpose_macros",
+                "cranpose_ui",
+            ]
+            .contains(&krate)
 }
 fn fn_bound(bound: &TypeParamBound) -> bool {
     matches!(bound,TypeParamBound::Trait(t) if t.path.segments.last().is_some_and(|s|["Fn","FnMut","FnOnce"].iter().any(|n|s.ident==n)))
@@ -160,11 +297,12 @@ fn function(
     f: &syn::ItemFn,
     attr: &syn::Attribute,
     context: &Context,
-    source: &SourceFile,
+    file: &Parsed,
     index: &Index,
     config: &Config,
     report: &mut Report,
 ) {
+    let source = &file.source;
     let no_skip = attr
         .parse_args::<syn::Ident>()
         .is_ok_and(|i| i == "no_skip");
@@ -179,25 +317,26 @@ fn function(
     let name = f.sig.ident.to_string();
     let mut c = Composable {
         path: source.path.clone(),
-        qualified_name: format!("{}::{name}", context.key()),
+        qualified_name: format!("{}::{name}", context.scope().key()),
         name: name.clone(),
-        location: Location::span(&source.source, f.sig.ident.span()),
+        location: Location::within(&source.source, &file.lines, f.sig.ident.span()),
         skip_mode: mode.into(),
         parameters: Vec::new(),
     };
     for arg in &f.sig.inputs {
         let FnArg::Typed(p) = arg else { continue };
         let parameter = p.pat.to_token_stream().to_string();
-        let (stability, mut effect, mut reason, advice) = if matches!(
+        let (stability, mut effect, mut reason, advice, resolved) = if matches!(
             p.ty.as_ref(),
             Type::ImplTrait(_)
         ) && !zero_arg_impl(&p.ty)
         {
-            (Stability::Unstable,Effect::SkippingDisabled,"This impl Trait parameter takes Cranpose's non-skipping expansion for the entire composable.".into(),"Use an explicit generic value type with Clone + PartialEq when skipping is appropriate. Keep callbacks intentional; do not add false equality implementations.".into())
+            (Stability::Unstable,Effect::SkippingDisabled,"This impl Trait parameter takes Cranpose's non-skipping expansion for the entire composable.".into(),"Use an explicit generic value type with Clone + PartialEq when skipping is appropriate. Keep callbacks intentional; do not add false equality implementations.".into(),None)
         } else if callback(&p.ty, &f.sig.generics) {
-            (Stability::Unstable,Effect::AlwaysChanged,"Cranpose updates callback holders and marks callback parameters changed on every parent invocation.".into(),"This is expected for callbacks. Keep callback-taking boundaries small or suppress this diagnostic with a documented reason.".into())
+            (Stability::Unstable,Effect::AlwaysChanged,"Cranpose updates callback holders and marks callback parameters changed on every parent invocation.".into(),"This is expected for callbacks. Keep callback-taking boundaries small or suppress this diagnostic with a documented reason.".into(),None)
         } else {
-            types::shape(&p.ty, &f.sig.generics, context, index, config).verdict()
+            let v = types::shape(&p.ty, &f.sig.generics, context, index, config).verdict();
+            (v.stability, v.effect, v.reason, v.advice, v.resolved)
         };
         let inactive = no_skip || (unhandled && effect != Effect::SkippingDisabled);
         let rule = match effect {
@@ -232,7 +371,7 @@ fn function(
         let param = Parameter {
             name: parameter.clone(),
             type_text: p.ty.to_token_stream().to_string(),
-            location: Location::span(&source.source, p.ty.span()),
+            location: Location::within(&source.source, &file.lines, p.ty.span()),
             stability,
             effect,
             reason,
@@ -243,6 +382,7 @@ fn function(
                 rule.map(str::to_string)
             },
             suppressed,
+            resolved_type: resolved,
         };
         if !no_skip
             && param.suppressed.is_none()
