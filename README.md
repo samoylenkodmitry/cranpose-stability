@@ -113,13 +113,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: samoylenkodmitry/cranpose-stability@main
+      - uses: samoylenkodmitry/cranpose-stability@v0.2.0
         with:
           path: .
           deny-unknown: 'false'
 ```
 
-Pin the action to a reviewed commit in production workflows. The action builds the tool in the runner's temporary directory and emits GitHub annotations with source locations. It does not compile your application. JSON and SARIF output are also available from the CLI.
+Pin the action to a release tag or a reviewed commit in production workflows. The action builds the tool in the runner's temporary directory and emits GitHub annotations with source locations. It does not compile your application. JSON and SARIF output are also available from the CLI.
 
 ## Editor protocol
 

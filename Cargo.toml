@@ -1,6 +1,6 @@
 [package]
 name = "cranpose-stability"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Cranpose parameter stability analysis for editors and CI"
@@ -21,7 +21,7 @@ walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
-cranpose-core = { git = "https://github.com/samoylenkodmitry/Cranpose", rev = "a49e7a781bfbab626f4ea3f6aadbdc2c1eb3e06b" }
+cranpose-core = { git = "https://github.com/samoylenkodmitry/Cranpose", rev = "283736c61e85486214ba0ef8b9ac813000b5055d" }
 
 [lints.rust]
 unsafe_code = "forbid"
