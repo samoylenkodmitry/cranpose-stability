@@ -21,7 +21,7 @@ walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
-cranpose-core = "0.13.0"
+cranpose-core = "0.17.2"
 
 [lints.rust]
 unsafe_code = "forbid"

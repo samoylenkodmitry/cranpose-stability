@@ -138,7 +138,7 @@ Overlays replace disk content only in memory. Source ranges include byte offsets
 
 ## Scope and policy
 
-Policy `cranpose-param-state-v1` follows the framework's [composable expansion](https://github.com/samoylenkodmitry/Cranpose/blob/e177b19985c303a13fcf40d61decc7253fdbe057/crates/cranpose-macros/src/lib.rs) and [parameter slots](https://github.com/samoylenkodmitry/Cranpose/blob/e177b19985c303a13fcf40d61decc7253fdbe057/crates/cranpose-core/src/callbacks.rs). Runtime contract tests use cranpose-core 0.13.0 from crates.io.
+Policy `cranpose-param-state-v1` follows the framework's [composable expansion](https://github.com/samoylenkodmitry/Cranpose/blob/e177b19985c303a13fcf40d61decc7253fdbe057/crates/cranpose-macros/src/lib.rs) and [parameter slots](https://github.com/samoylenkodmitry/Cranpose/blob/e177b19985c303a13fcf40d61decc7253fdbe057/crates/cranpose-core/src/callbacks.rs). Runtime contract tests use cranpose-core 0.17.2 from crates.io.
 
 This is source analysis on stable Rust, not a rustc compiler plugin. It analyzes all discovered Rust source files except excluded directories. Project modules follow file layout; `mod` items that load other project files (`#[path]`, binaries and examples outside `src/`) are followed too. Imports, renames, glob imports with Rust's visibility and shadowing rules, the standard prelude, type aliases, function-body `use` items and renamed or `workspace = true` dependencies are resolved.
 
