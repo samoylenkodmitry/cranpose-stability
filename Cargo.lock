@@ -152,9 +152,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "cranpose-core"
-version = "0.13.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd7cc73cb6c79f3f767ed366376e467899d0925bfcaa152fab116dfab3ebcb47"
+checksum = "1674d28817cd43ad88a64fcc3d2aa7d3e70f5caa7459d0ce2199e3010f87d103"
 dependencies = [
  "dispatch2",
  "event-listener",
