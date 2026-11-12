@@ -1,6 +1,6 @@
 [package]
 name = "cranpose-stability"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.98"
 description = "Cranpose parameter stability analysis for editors and CI"
@@ -21,7 +21,7 @@ walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
-cranpose-core = "0.17.2"
+cranpose-core = "0.22.4"
 
 [lints.rust]
 unsafe_code = "forbid"
