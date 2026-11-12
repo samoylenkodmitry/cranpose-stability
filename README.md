@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: samoylenkodmitry/cranpose-stability@v0.2.0
+      - uses: samoylenkodmitry/cranpose-stability@v0.2.2
         with:
           path: .
           deny-unknown: 'false'
